@@ -1,0 +1,15 @@
+{
+  "name": "kira-tech-bot",
+  "version": "1.0.0",
+  "description": "KIRA TECH BOT - WhatsApp & Telegram",
+  "main":q "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@whiskeystxockets/baileys": "^6.7.0",
+Pr    "node-telegram-bot-api": "^0.66.0",
+    "pino": "^8.19.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
