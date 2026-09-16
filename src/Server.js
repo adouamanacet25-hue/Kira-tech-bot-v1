@@ -1,585 +1,475 @@
-const TelegramBot = require('node-telegram-bot-api');
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
+    Browsers
+} = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 
-// ============ CONFIGURATION ============
-const TELEGRAM_TOKEN = '8717824473:AAFt2phoLICy9tBdKnAdnvn0tOguz7YVZH4';
-const BOT_NAME = 'KIRA TECH BOT 🌹';
-const AUTEUR = 'Mr KIRA TECH';
-const IMAGE_URL = 'https://i.ibb.co/hJb/52-C1-EBD9-25-DC-44-E8-894-E-BE9755-E9-CB2-A.jpg';
-const CHANNEL_WA = 'https://whatsapp.com/channel/0029Vb7WJzp84OmBD0fEEJ2X';
-const CHANNEL_TG = 'https://t.me/+mQ3aQpCsEqI0YmY0';
-const PREFIX = '.';
+// ===== CONFIGURATION =====
+const WA_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb7WJzp84OmBD0fEEJ2X';
+const TG_CHANNEL_LINK = 'https://t.me/+mQ3aQpCsEqI0YmY0';
+const TG_GROUP_LINK = 'https://t.me/+Z-P_xjUgJjU0MjM0';
+const BOT_IMAGE_URL = 'https://i.ibb.co/hJqtxPrb/52-C1-EBD9-25-DC-44-E8-894-E-BE9755-E9-CB2-A.jpg';
+const SESSION_DIR = './sessions';
 
-// Stockage des sessions WhatsApp par utilisateur Telegram
-const userSessions = new Map();
-const pairingCodes = new Map();
+// ===== EXPRESS =====
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-// ============ BOT TELEGRAM ============
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
 
-// ---- /start ----
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  
-  const startMessage = `
-═══════════════════════════════════════════
-   ✦  WELCOME IN BOT TELEGRAM ✦
-═══════════════════════════════════════════
+// ===== WHATSAPP (Baileys) =====
+let waSocket = null;
+let isConnecting = false;
+let currentQR = null;
+let connectionStatus = 'disconnected';
+let connectedUser = null;
+let pairingRequests = new Map(); // Stocke les demandes en cours par phone
 
-✅ NAME       :  KIRA TECH BOT 🌹
+// Liste des messages reçus (pour admin/debug)
+const recentMessages = [];
 
-👑 CREATOR   : MR KIRA TECH ✨
+// ===== LOGGER SILENCIEUX =====
+const logger = pino({ level: 'silent' });
 
-───────────────────────────────────────────
-  DESCRIPTION
-───────────────────────────────────────────
-It's a Telegram bot that connects to
-a WhatsApp account for use many commands
+// ===== GARANTIR LE DOSSIER SESSION =====
+function ensureSessionDir() {
+    const sessionPath = path.join(__dirname, SESSION_DIR);
+    if (!fs.existsSync(sessionPath)) {
+        fs.mkdirSync(sessionPath, { recursive: true });
+    }
+    return sessionPath;
+}
 
-───────────────────────────────────────────
-  JOIN MY CHANNEL
-───────────────────────────────────────────
+// ===== DÉMARRER WHATSAPP =====
+async function startWhatsApp() {
+    if (isConnecting) return;
+    isConnecting = true;
 
-${CHANNEL_WA}
+    try {
+        const sessionPath = ensureSessionDir();
+        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+        const { version } = await fetchLatestBaileysVersion();
 
-🔗 ${CHANNEL_TG}
+        waSocket = makeWASocket({
+            version,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, logger)
+            },
+            printQRInTerminal: false,
+            logger,
+            browser: Browsers.ubuntu('Chrome'),
+            generateHighQualityLinkPreview: true,
+            syncFullHistory: false,
+            markOnlineOnConnect: true,
+            getMessage: async () => undefined
+        });
 
-───────────────────────────────────────────
-  EXAMPLE COMMAND
-───────────────────────────────────────────
-⚡ Type : /pair 242...  (to use the bot) ✅
+        waSocket.ev.on('creds.update', saveCreds);
 
-═══════════════════════════════════════════
-  `;
+        waSocket.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
 
-  await bot.sendPhoto(chatId, IMAGE_URL, {
-    caption: startMessage,
-    parse_mode: 'Markdown'
-  });
-});
+            if (qr) {
+                currentQR = qr;
+                connectionStatus = 'qr';
+                console.log('📱 QR Code généré');
+            }
 
-// ---- /help ----
-bot.onText(/\/help/, async (msg) => {
-  const chatId = msg.chat.id;
-  
-  const helpMessage = `
-📖 *KIRA TECH BOT - AIDE*
+            if (connection === 'close') {
+                const statusCode = (lastDisconnect?.error instanceof Boom)
+                    ? lastDisconnect.error.output?.statusCode
+                    : 0;
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                connectionStatus = 'disconnected';
+                connectedUser = null;
+                currentQR = null;
+                isConnecting = false;
 
-*COMMANDES DISPONIBLES :*
+                console.log(`❌ Connexion fermée. Code: ${statusCode}, Reconnexion: ${shouldReconnect}`);
 
-/start - Message de bienvenue
-/help - Cette aide
-/pair <numéro> - Connecter WhatsApp
-/menu - Menu des commandes WhatsApp
+                if (shouldReconnect) {
+                    setTimeout(() => startWhatsApp(), 5000);
+                } else {
+                    // Déconnecté volontairement : nettoyer la session
+                    try {
+                        const sessionPath = path.join(__dirname, SESSION_DIR);
+                        if (fs.existsSync(sessionPath)) {
+                            fs.rmSync(sessionPath, { recursive: true, force: true });
+                            console.log('🗑️ Session nettoyée (logged out)');
+                        }
+                    } catch (e) {
+                        console.error('Erreur nettoyage session:', e.message);
+                    }
+                    setTimeout(() => startWhatsApp(), 3000);
+                }
+            } else if (connection === 'open') {
+                connectionStatus = 'connected';
+                currentQR = null;
+                isConnecting = false;
+                connectedUser = waSocket.user?.id || null;
+                console.log('✅ WhatsApp connecté !');
+                console.log('👤 Utilisateur:', connectedUser);
+            }
+        });
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ===== MESSAGES WHATSAPP =====
+        waSocket.ev.on('messages.upsert', async ({ messages, type }) => {
+            if (type !== 'notify') return;
 
-*COMMENT SE CONNECTER :*
+            for (const msg of messages) {
+                try {
+                    if (!msg.message) continue;
+                    if (msg.key.fromMe) continue;
 
-1️⃣ Tape : \`/pair 242061234567\`
-   (sans le +, format international)
+                    const text = msg.message.conversation ||
+                                msg.message.extendedTextMessage?.text ||
+                                msg.message.imageMessage?.caption ||
+                                msg.message.videoMessage?.caption ||
+                                '';
+                    const from = msg.key.remoteJid;
 
-2️⃣ Récupère le code de pairage
+                    // Stocker pour debug
+                    recentMessages.push({
+                        from,
+                        text,
+                        timestamp: Date.now(),
+                        pushName: msg.pushName
+                    });
+                    if (recentMessages.length > 50) recentMessages.shift();
 
-3️⃣ Ouvre WhatsApp sur ton téléphone
+                    const trimmed = text.trim().toLowerCase();
 
-4️⃣ Va dans : Paramètres → Appareils connectés
+                    // ===== COMMANDES =====
+                    if (trimmed === '.menu' || trimmed === 'menu') {
+                        await waSocket.sendMessage(from, {
+                            image: { url: BOT_IMAGE_URL },
+                            caption: MENU_TEXT
+                        });
+                    } else if (trimmed === '.ping' || trimmed === 'ping') {
+                        const start = Date.now();
+                        await waSocket.sendMessage(from, { text: '🏓 Pong !' });
+                        const latency = Date.now() - start;
+                        await waSocket.sendMessage(from, { text: `⚡ Latence: ${latency}ms` });
+                    } else if (trimmed === '.blague') {
+                        const blagues = [
+                            "Pourquoi les bots ne se battent jamais ? Parce qu'ils ont peur de perdre la connexion ! 😂",
+                            "Qu'est-ce qu'un développeur en hiver ? Un développeur qui a froid aux doigts... code ! 🥶",
+                            "Pourquoi WhatsApp n'a jamais faim ? Parce qu'il a toujours des messages à lire ! 📱"
+                        ];
+                        const blague = blagues[Math.floor(Math.random() * blagues.length)];
+                        await waSocket.sendMessage(from, { text: blague });
+                    } else if (trimmed === '.alive') {
+                        await waSocket.sendMessage(from, {
+                            text: `✅ *Kira Tech Bot est vivant !*\n\n⏱️ Uptime: ${Math.floor(process.uptime())}s\n👤 Connecté: ${connectedUser ? 'Oui' : 'Non'}\n🌐 Statut: ${connectionStatus}`
+                        });
+                    } else if (trimmed === '.owner') {
+                        await waSocket.sendMessage(from, {
+                            text: `👑 *Propriétaire*\n\n⫸ »͜͡𝐌𝐫 KIRA_TECH ⫷\n\n📢 Chaîne WA: ${WA_CHANNEL_LINK}`
+                        });
+                    } else if (trimmed === '.groupinfo') {
+                        if (from.endsWith('@g.us')) {
+                            try {
+                                const metadata = await waSocket.groupMetadata(from);
+                                const info =
+                                    `📛 *Nom:* ${metadata.subject}\n` +
+                                    `👥 *Membres:* ${metadata.participants.length}\n` +
+                                    `📝 *Description:* ${metadata.desc || 'Aucune'}\n` +
+                                    `🆔 *ID:* ${metadata.id}`;
+                                await waSocket.sendMessage(from, { text: info });
+                            } catch (e) {
+                                await waSocket.sendMessage(from, { text: '❌ Impossible de récupérer les infos.' });
+                            }
+                        } else {
+                            await waSocket.sendMessage(from, { text: '❌ Commande uniquement en groupe.' });
+                        }
+                    } else if (trimmed === '.link') {
+                        if (from.endsWith('@g.us')) {
+                            try {
+                                const code = await waSocket.groupInviteCode(from);
+                                await waSocket.sendMessage(from, {
+                                    text: `🔗 *Lien du groupe:*\nhttps://chat.whatsapp.com/${code}`
+                                });
+                            } catch (e) {
+                                await waSocket.sendMessage(from, { text: '❌ Impossible de générer le lien.' });
+                            }
+                        }
+                    } else if (trimmed === '.tagall') {
+                        if (from.endsWith('@g.us')) {
+                            try {
+                                const metadata = await waSocket.groupMetadata(from);
+                                const mentions = metadata.participants.map(p => p.id);
+                                const textMsg = `📢 *Annonce*\n\n${metadata.participants.map(p => `@${p.id.split('@')[0]}`).join(' ')}`;
+                                await waSocket.sendMessage(from, {
+                                    text: textMsg,
+                                    mentions
+                                });
+                            } catch (e) {
+                                await waSocket.sendMessage(from, { text: '❌ Erreur tagall.' });
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error('Erreur traitement message:', err.message);
+                }
+            }
+        });
 
-5️⃣ Clique sur "Connecter un appareil"
+        // ===== ÉVÉNEMENTS GROUPE (WELCOME/GOODBYE) =====
+        waSocket.ev.on('group-participants.update', async (update) => {
+            try {
+                const { id, participants, action } = update;
 
-6️⃣ Choisis "Connecter avec un numéro de téléphone"
+                for (const participant of participants) {
+                    const number = participant.split('@')[0];
+                    const metadata = await waSocket.groupMetadata(id);
 
-7️⃣ Entre le code de pairage
+                    if (action === 'add') {
+                        const welcomeMsg =
+                            `╔══════════════════════════════════╗\n` +
+                            `   ✦  WELCOME IN GROUP ✦\n` +
+                            `╚══════════════════════════════════╝\n\n` +
+                            `- NAME: @${number}\n\n` +
+                            `───────────────────────────────────\n` +
+                            `📛 Nom: ${metadata.subject}\n` +
+                            `👥 Membres: ${metadata.participants.length}\n` +
+                            `───────────────────────────────────\n` +
+                            `🔗 Chaîne WA: ${WA_CHANNEL_LINK}\n` +
+                            `───────────────────────────────────\n` +
+                            `> power by kira tech`;
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        await waSocket.sendMessage(id, {
+                            image: { url: BOT_IMAGE_URL },
+                            caption: welcomeMsg,
+                            mentions: [participant]
+                        });
+                    } else if (action === 'remove') {
+                        const goodbyeMsg =
+                            `╔══════════════════════════════════╗\n` +
+                            `   ✦  GOOD BYE ✦\n` +
+                            `╚══════════════════════════════════╝\n\n` +
+                            `- NAME: @${number}\n\n` +
+                            `───────────────────────────────────\n` +
+                            `📛 Nom: ${metadata.subject}\n` +
+                            `👥 Membres restants: ${metadata.participants.length}\n` +
+                            `───────────────────────────────────\n` +
+                            `> power by kira tech`;
 
-*POUR IPHONE :*
-Paramètres → Appareils connectés → Lier un appareil
+                        await waSocket.sendMessage(id, {
+                            image: { url: BOT_IMAGE_URL },
+                            caption: goodbyeMsg,
+                            mentions: [participant]
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error('Erreur welcome/goodbye:', err.message);
+            }
+        });
 
-*POUR ANDROID :*
-Menu (⋮) → Appareils connectés → Lier un appareil
+        isConnecting = false;
+    } catch (err) {
+        console.error('Erreur startWhatsApp:', err.message);
+        isConnecting = false;
+        setTimeout(() => startWhatsApp(), 5000);
+    }
+}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🌹 *${BOT_NAME}* par *${AUTEUR}*
-  `;
-
-  await bot.sendMessage(chatId, helpMessage, { parse_mode: 'Markdown' });
-});
-
-// ---- /pair ----
-bot.onText(/\/pair (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const phoneNumber = match[1].replace(/[^0-9]/g, ''); // Enlever tout sauf les chiffres
-
-  if (!phoneNumber || phoneNumber.length < 10) {
-    return bot.sendMessage(chatId, '❌ Numéro invalide. Format : /pair 242061234567');
-  }
-
-  await bot.sendMessage(chatId, `Demande de pairing code..... 🔄`);
-
-  try {
-    const code = await createWhatsAppSession(chatId, phoneNumber);
-    
-    const pairMessage = `
-Name : KIRA_BOT_TECH 🌹
-
-Demande de paring au ${phoneNumber}
-
-___________||||||||||||||||||||||||||||||__________
-
-           \`${code}\`
-
-________||||||||||||||||||||||||||||||||||||____________
-
-Merci à ${AUTEUR} 🌹 pour ton bot 🤖
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-*COMMENT CONNECTER :*
-
-📱 *ANDROID :*
-WhatsApp → Menu (⋮) → Appareils connectés
-→ Lier un appareil → Lier avec numéro de téléphone
-→ Entre le code ci-dessus
-
-📱 *IPHONE :*
-WhatsApp → Paramètres → Appareils connectés
-→ Lier un appareil → Lier avec numéro de téléphone
-→ Entre le code ci-dessus
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️ Le code expire dans 5 minutes
-    `;
-
-    await bot.sendMessage(chatId, pairMessage, { parse_mode: 'Markdown' });
-    
-    // Le code expire après 5 minutes
-    setTimeout(() => {
-      pairingCodes.delete(chatId);
-      bot.sendMessage(chatId, '⏰ Le code de pairage a expiré. Utilise /pair à nouveau.');
-    }, 5 * 60 * 1000);
-
-  } catch (error) {
-    console.error('Erreur pairing:', error);
-    await bot.sendMessage(chatId, `❌ Erreur lors de la demande de pairage.\n${error.message}`);
-  }
-});
-
-// ---- /menu ----
-bot.onText(/\/menu/, async (msg) => {
-  const chatId = msg.chat.id;
-  
-  const menuMessage = `
-▉ *KIRA TECH B0T* 🌹▉
+// ===== TEXTE DU MENU =====
+const MENU_TEXT =
+`▉ KIRA TECH B0T🌹▉
 ▰▰▰▰▰▰▰▰▰▰
-➠ Auteur : ${AUTEUR}
+➠ Auteur : Mr kira tech 🌹
 ➠ Prefix: *[ . ]*
-➠ Total Cmds: *100*
 
 ______________________
 
-> ╢ GROUP ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .add
-┆❏ .antibadword
-┆❏ .antibot
-┆❏ .antilink
-┆❏ .antispam
-┆❏ .antitag
-┆❏ .goodbye
-┆❏ .del
-┆❏ .ppgroup
-┆❏ .groupinfo
-┆❏ .groupname
-┆❏ .kick
-┆❏ .left
-┆❏ .link
-┆❏ .listadmin
-┆❏ .mute
-┆❏ .promote
-┆❏ .purge
-┆❏ .resetlink
-┆❏ .revoke
-┆❏ .setgdesc
-┆❏ .staff
-┆❏ .tag
-┆❏ .tagall
-┆❏ .unmute
-┆❏ .welcome
-╰▰▰▰▰▰▰▰◈
-
-> ╢ FUN ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .blague
-┆❏ .character
-┆❏ .compliment
-┆❏ .dare
-┆❏ .fact
-┆❏ .flirt
-┆❏ .gif
-┆❏ .goodnight
-┆❏ .meme
-┆❏ .news
-┆❏ .quote
-┆❏ .roseday
-┆❏ .ship
-┆❏ .stupid
-┆❏ .trivia
-┆❏ .truth
-┆❏ .valentine
-╰▰▰▰▰▰▰▰◈
-
-> ╢ OWNER ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .allkaya
-┆❏ .autoreact
-┆❏ .autostatus
-┆❏ .ban
-┆❏ .block
-┆❏ .blockinbox
-┆❏ .getpp
-┆❏ .private
-┆❏ .recording
-┆❏ .report
-┆❏ .sudo
-┆❏ .typing
-┆❏ .unban
-┆❏ .update
-╰▰▰▰▰▰▰▰◈
-
-> ╢ MEDIA ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .instagram
-┆❏ .video
-┆❏ .apk
-┆❏ .capcut
-┆❏ .facebook
-┆❏ .getstatus
-┆❏ .img
-┆❏ .mediafire
-┆❏ .movie
-┆❏ .pinterest
-┆❏ .wallpapers
-╰▰▰▰▰▰▰▰◈
-
 > ╢ GENERAL ♰
 ╭▰▰▰▰▰▰▰◈
-┆❏ .alive
-┆❏ .antidelete
-┆❏ .channelid
-┆❏ .fancy
-┆❏ .gpstatus
 ┆❏ .menu
-┆❏ .owner
-┆❏ .pair
 ┆❏ .ping
-┆❏ .repo
-┆❏ .voice
+┆❏ .alive
+┆❏ .owner
+┆❏ .blague
+┆❏ .groupinfo
+┆❏ .link
+┆❏ .tagall
 ╰▰▰▰▰▰▰▰◈
 
-> ╢ AI ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .tts
-┆❏ .ai
-┆❏ .chatbot
-┆❏ .imagine
-┆❏ .manga
-┆❏ .pixelart
-┆❏ .gsticker
-┆❏ .traduc
-╰▰▰▰▰▰▰▰◈
+> power by kira tech`;
 
-> ╢ TOOLS ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .attp
-┆❏ .photo
-┆❏ .sticker
-┆❏ .tg
-┆❏ .take
-┆❏ .textmaker
-┆❏ .url
-┆❏ .vv
-╰▰▰▰▰▰▰▰◈
+// ===== ROUTES API =====
 
-> ╢ SYSTEM ♰
-╭▰▰▰▰▰▰▰◈
-┆❏ .allprefix
-┆❏ .botimage
-┆❏ .botname
-┆❏ .delprefix
-┆❏ .online
-┆❏ .prefix
-┆❏ .speed
-╰▰▰▰▰▰▰▰◈
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🌹 *${BOT_NAME}* par *${AUTEUR}*
-  `;
-
-  await bot.sendMessage(chatId, menuMessage, { parse_mode: 'Markdown' });
+// Route santé
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ============ FONCTION WHATSAPP ============
-async function createWhatsAppSession(telegramChatId, phoneNumber) {
-  return new Promise(async (resolve, reject) => {
+app.get('/api/status', (req, res) => {
+    res.json({
+        status: connectionStatus,
+        connected: connectionStatus === 'connected',
+        user: connectedUser,
+        hasQR: !!currentQR,
+        uptime: Math.floor(process.uptime())
+    });
+});
+
+// Route pour demander un code de jumelage
+app.post('/api/pair', async (req, res) => {
     try {
-      const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-      const { version } = await fetchLatestBaileysVersion();
+        const { phone } = req.body;
 
-      const sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
-        browser: ['KIRA TECH', 'Chrome', '1.0.0'],
-      });
-
-      sock.ev.on('creds.update', saveCreds);
-
-      // Demander le code de pairage
-      const code = await sock.requestPairingCode(phoneNumber);
-      
-      userSessions.set(telegramChatId, sock);
-      pairingCodes.set(telegramChatId, code);
-
-      // Écouter les événements de connexion
-      sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'open') {
-          await bot.sendMessage(telegramChatId, `
-Succès 🎉🎉🎉🎉
-Bot is connect ✅
-Statut : open ✅
-Maintenant utiliser les commandes du bot
-
-Merci à ${AUTEUR}
-          `);
-
-          // Envoyer le menu WhatsApp
-          await sock.sendMessage(sock.user.id, {
-            image: { url: IMAGE_URL },
-            caption: '🌹 KIRA TECH BOT connecté ! Tape .menu pour voir les commandes.'
-          });
+        if (!phone) {
+            return res.status(400).json({
+                success: false,
+                error: 'Numéro manquant'
+            });
         }
 
-        if (connection === 'close') {
-          const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== 401;
-          if (shouldReconnect) {
-            console.log('Reconnexion...');
-          }
+        // Nettoyer le numéro
+        const cleanPhone = phone.replace(/\D/g, '');
+
+        if (cleanPhone.length < 8) {
+            return res.status(400).json({
+                success: false,
+                error: 'Numéro invalide. Format international requis (ex: 242061234567)'
+            });
         }
-      });
 
-      // Écouter les messages WhatsApp
-      sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
-
-        for (const msg of messages) {
-          if (!msg.message || msg.key.fromMe) continue;
-
-          const messageText = msg.message.conversation || 
-                             msg.message.extendedTextMessage?.text || '';
-
-          if (!messageText.startsWith(PREFIX)) continue;
-
-          const command = messageText.slice(PREFIX.length).trim().split(' ')[0].toLowerCase();
-          const args = messageText.slice(PREFIX.length).trim().split(' ').slice(1);
-
-          await handleWhatsAppCommand(sock, msg, command, args);
+        // Vérifier que WhatsApp est prêt
+        if (!waSocket) {
+            return res.status(503).json({
+                success: false,
+                error: 'Le bot WhatsApp n\'est pas initialisé. Réessayez dans quelques secondes.'
+            });
         }
-      });
 
-      resolve(code);
-    } catch (error) {
-      reject(error);
+        // Vérifier si déjà connecté
+        if (waSocket.authState?.creds?.registered || connectionStatus === 'connected') {
+            return res.json({
+                success: true,
+                alreadyConnected: true,
+                message: '✅ Le bot est déjà connecté à WhatsApp !'
+            });
+        }
+
+        // Éviter les demandes multiples en parallèle pour le même numéro
+        if (pairingRequests.has(cleanPhone)) {
+            const existing = pairingRequests.get(cleanPhone);
+            if (Date.now() - existing.timestamp < 60000) {
+                return res.json({
+                    success: true,
+                    code: existing.formattedCode,
+                    message: 'Code déjà généré (réutilisé)'
+                });
+            }
+        }
+
+        // Attendre un peu que la connexion soit stable
+        if (isConnecting || !waSocket.authState) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        console.log(`🔑 Demande de code pour: ${cleanPhone}`);
+
+        // Demander le code de jumelage
+        let code;
+        try {
+            code = await waSocket.requestPairingCode(cleanPhone);
+        } catch (err) {
+            console.error('Erreur requestPairingCode:', err.message);
+            return res.status(500).json({
+                success: false,
+                error: `Erreur WhatsApp: ${err.message}`
+            });
+        }
+
+        if (!code) {
+            return res.status(500).json({
+                success: false,
+                error: 'Aucun code reçu de WhatsApp. Réessayez.'
+            });
+        }
+
+        // Formater le code (ex: ABCD-EFGH)
+        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
+
+        // Stocker la demande
+        pairingRequests.set(cleanPhone, {
+            code,
+            formattedCode,
+            timestamp: Date.now()
+        });
+
+        // Nettoyer les vieilles demandes
+        for (const [key, val] of pairingRequests.entries()) {
+            if (Date.now() - val.timestamp > 5 * 60 * 1000) {
+                pairingRequests.delete(key);
+            }
+        }
+
+        console.log(`✅ Code généré pour ${cleanPhone}: ${formattedCode}`);
+
+        return res.json({
+            success: true,
+            code: formattedCode,
+            rawCode: code,
+            phone: cleanPhone,
+            message: 'Code généré ! Entrez-le dans WhatsApp.'
+        });
+
+    } catch (err) {
+        console.error('Erreur /api/pair:', err);
+        return res.status(500).json({
+            success: false,
+            error: err.message || 'Erreur inconnue'
+        });
     }
-  });
-}
+});
 
-// ============ GESTION DES COMMANDES WHATSAPP ============
-async function handleWhatsAppCommand(sock, msg, command, args) {
-  const from = msg.key.remoteJid;
-  const isGroup = from.endsWith('@g.us');
-  const sender = msg.key.participant || msg.key.remoteJid;
+// Route debug : messages récents
+app.get('/api/messages', (req, res) => {
+    res.json(recentMessages);
+});
 
-  const reply = async (text) => {
-    await sock.sendMessage(from, { text }, { quoted: msg });
-  };
-
-  switch (command) {
-    case 'ping':
-      await reply(`🏓 Pong !\nLatence: ${Date.now() - msg.messageTimestamp * 1000}ms`);
-      break;
-
-    case 'menu':
-      await reply('📋 Menu WhatsApp\n\nTape .help pour la liste complète des commandes.');
-      break;
-
-    case 'alive':
-      await reply('✅ KIRA TECH BOT est en ligne !');
-      break;
-
-    case 'owner':
-      await reply(`👑 Owner: ${AUTEUR}\n📞 Contact: https://t.me/+242061167625`);
-      break;
-
-    case 'blague':
-      const blagues = [
-        "Pourquoi les plongeurs plongent-ils toujours en arrière ?\nParce que sinon ils tombent dans le bateau !",
-        "Que dit un informaticien quand il est fatigué ?\nJe vais faire un break... point.",
-        "Pourquoi les développeurs préfèrent-ils le noir ?\nParce que le light attire les bugs !"
-      ];
-      await reply(`😄 ${blagues[Math.floor(Math.random() * blagues.length)]}`);
-      break;
-
-    case 'quote':
-      const quotes = [
-        "La vie, c'est comme une bicyclette, il faut avancer pour ne pas perdre l'équilibre. - Albert Einstein",
-        "Le succès, c'est tomber sept fois et se relever huit. - Proverbe japonais",
-        "La meilleure façon de prédire l'avenir, c'est de le créer. - Peter Drucker"
-      ];
-      await reply(`💬 ${quotes[Math.floor(Math.random() * quotes.length)]}`);
-      break;
-
-    case 'fact':
-      const facts = [
-        "Les pieuvres ont trois cœurs.",
-        "Une journée sur Vénus est plus longue qu'une année sur Vénus.",
-        "Le miel ne se périme jamais."
-      ];
-      await reply(`🤓 Le saviez-vous ?\n${facts[Math.floor(Math.random() * facts.length)]}`);
-      break;
-
-    case 'help':
-      await reply(`
-📖 *AIDE KIRA TECH BOT*
-
-Commandes disponibles :
-.ping - Test de latence
-.menu - Menu principal
-.alive - Statut du bot
-.owner - Contacter le propriétaire
-.blague - Blague aléatoire
-.quote - Citation inspirante
-.fact - Fait intéressant
-.help - Cette aide
-
-D'autres commandes arrivent bientôt !
-      `);
-      break;
-
-    default:
-      await reply(`❌ Commande inconnue : .${command}\nTape .help pour voir les commandes disponibles.`);
-  }
-}
-
-// ============ GESTION DES GROUPES (WELCOME/GOODBYE) ============
-function setupGroupEvents(sock) {
-  sock.ev.on('group-participants.update', async (update) => {
-    const { id, participants, action } = update;
-    
+// Route pour déconnecter (logout)
+app.post('/api/logout', async (req, res) => {
     try {
-      const groupMetadata = await sock.groupMetadata(id);
-      const groupName = groupMetadata.subject;
-      const groupDesc = groupMetadata.desc || 'Aucune description';
-      const memberCount = groupMetadata.participants.length;
-
-      for (const participant of participants) {
-        const phoneNumber = participant.split('@')[0];
-        
-        if (action === 'add') {
-          // Message de bienvenue
-          const welcomeMsg = `
-═══════════════════════════════════════════
-   ✦  WELCOME IN GROUPES ✦
-═══════════════════════════════════════════
-
-- NAME: @${phoneNumber}
-- Numbers phone : ${phoneNumber}
-
-───────────────────────────────────────────
-  ${groupName}
-───────────────────────────────────────────
-${groupDesc}
-───────────────────────────────────────────
-  JOIN MY CHANNEL
-──────────────────────────────────────────
-
-${CHANNEL_WA}
-
-🔗 ${CHANNEL_TG}
-
-───────────────────────────────────────────
-Nombre de membres : ${memberCount}
-───────────────────────────────────────────
-
-> power by kira tech
-═══════════════════════════════════════════
-          `;
-
-          await sock.sendMessage(id, {
-            image: { url: IMAGE_URL },
-            caption: welcomeMsg,
-            mentions: [participant]
-          });
+        if (waSocket && connectionStatus === 'connected') {
+            await waSocket.logout();
+            connectionStatus = 'disconnected';
+            connectedUser = null;
+            return res.json({ success: true, message: 'Déconnecté' });
         }
-
-        if (action === 'remove') {
-          // Message de départ
-          const goodbyeMsg = `
-═══════════════════════════════════════════
-   ✦  GOOD BYE IN GROUPES ✦
-═══════════════════════════════════════════
-
-- NAME: @${phoneNumber}
-- Numbers phone : ${phoneNumber}
-
-───────────────────────────────────────────
-  ${groupName}
-───────────────────────────────────────────
-${groupDesc}
-───────────────────────────────────────────
-  JOIN MY CHANNEL
-──────────────────────────────────────────
-
-${CHANNEL_WA}
-
-🔗 ${CHANNEL_TG}
-
-───────────────────────────────────────────
-Nombre de membres : ${memberCount}
-───────────────────────────────────────────
-
-> power by kira tech
-═══════════════════════════════════════════
-          `;
-
-          await sock.sendMessage(id, {
-            image: { url: IMAGE_URL },
-            caption: goodbyeMsg,
-            mentions: [participant]
-          });
-        }
-      }
-    } catch (error) {
-      console.error('Erreur événement groupe:', error);
+        return res.json({ success: false, message: 'Non connecté' });
+    } catch (err) {
+        return res.status(500).json({ success: false, error: err.message });
     }
-  });
-}
+});
 
-// ============ DÉMARRAGE ============
-console.log(`
-═══════════════════════════════════════════
-   ✦  KIRA TECH BOT 🌹  ✦
-═══════════════════════════════════════════
-   Auteur : ${AUTEUR}
-   Statut : Démarrage...
-═══════════════════════════════════════════
-`);
+// ===== LANCEMENT =====
+app.listen(PORT, () => {
+    console.log(`🌐 Serveur web sur http://localhost:${PORT}`);
+});
 
-console.log('✅ Bot Telegram démarré');
-console.log('📱 En attente de connexions WhatsApp...');
+startWhatsApp();
+
+// Nettoyage à l'arrêt
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Arrêt en cours...');
+    try {
+        if (waSocket) await waSocket.end(undefined);
+    } catch (e) {}
+    process.exit(0);
+});
