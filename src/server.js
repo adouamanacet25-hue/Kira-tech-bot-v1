@@ -1,198 +1,279 @@
 // ============================================================
-//  KIRA TECH BOT - Test de connexion WhatsApp (Baileys)
+//  KIRA TECH BOT - Test Telegram + WhatsApp Pairing
 //  Auteur : Mr KIRA TECH
-//  But : Générer un code de pairing et tester la connexion
+//  But : /pair génère un code, /start et /menu fonctionnent
 // ============================================================
 
+import TelegramBot from 'node-telegram-bot-api';
 import makeWASocket, {
   useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion
+  DisconnectReason
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import readline from 'readline';
-import { rmSync, existsSync } from 'fs';
 
-// ---------- Configuration ----------
-const SESSION_DIR = './session';          // Dossier où la session est stockée
-const USE_PAIRING_CODE = true;            // true = code de pairing, false = QR code
-const PHONE_NUMBER = '';                  // ← METS TON NUMÉRO ICI (format international, sans +)
-                                          // Exemple : '242061234567'
+// ---------- CONFIGURATION ----------
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || 'TON_TOKEN_ICI';
+const PREFIX = '.';
+const BOT_IMAGE = 'https://i.ibb.co/hJqtxPrb/52-C1-EBD9-25-DC-44-E8-894-E-BE9755-E9-CB2-A.jpg';
 
-// ---------- Logger silencieux (Baileys est très bavard) ----------
+// ---------- LOGGER SILENCIEUX ----------
 const logger = pino({ level: 'silent' });
 
-// ---------- Fonction pour demander une entrée utilisateur ----------
-function askQuestion(query) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-  return new Promise(resolve => rl.question(query, answer => {
-    rl.close();
-    resolve(answer.trim());
-  }));
-}
+// ---------- VARIABLES GLOBALES ----------
+let waSocket = null;
+let waConnected = false;
 
-// ---------- Démarrage du socket WhatsApp ----------
-async function startWhatsApp() {
-  console.log('═══════════════════════════════════════════');
-  console.log('   ✦  KIRA TECH BOT - TEST CONNEXION  ✦');
-  console.log('═══════════════════════════════════════════\n');
+// ============================================================
+//  PARTIE TELEGRAM
+// ============================================================
 
-  // Récupère la version la plus récente de WhatsApp Web
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`📡 Version WhatsApp Web : ${version.join('.')} (latest: ${isLatest})`);
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
 
-  // Charge ou crée l'état d'authentification
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+// ---------- /start ----------
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const text =
+    `╔══════════════════════════════════════════╗\n` +
+    `   ✦  WELCOME IN BOT TELEGRAM  ✦\n` +
+    `╚══════════════════════════════════════════╝\n\n` +
+    `✅ NAME       :  Kira Tech Bot 🌹\n` +
+    `👑 CREATOR   :  Mr KIRA TECH 🌹\n\n` +
+    `───────────────────────────────────────────\n` +
+    `  DESCRIPTION\n` +
+    `───────────────────────────────────────────\n` +
+    `It's a Telegram bot that connects to\n` +
+    `a WhatsApp account for use many commands\n\n` +
+    `───────────────────────────────────────────\n` +
+    `  JOIN MY CHANNEL\n` +
+    `───────────────────────────────────────────\n\n` +
+    `📱 WhatsApp Channel:\n` +
+    `https://whatsapp.com/channel/0029Vb7WJzp84OmBD0fEEJ2X\n\n` +
+    `📢 Telegram Channel:\n` +
+    `https://t.me/+mQ3aQpCsEqI0YmY0\n\n` +
+    `👥 Telegram Group:\n` +
+    `https://t.me/+Z-P_xjUgJjU0MjM0\n\n` +
+    `───────────────────────────────────────────\n` +
+    `  EXAMPLE COMMAND\n` +
+    `───────────────────────────────────────────\n` +
+    `⚡ Type : /pair 242...  (to use the bot) ✅\n\n` +
+    `═══════════════════════════════════════════`;
 
-  // Crée le socket
-  const sock = makeWASocket({
-    version,
-    logger,
-    printQRInTerminal: !USE_PAIRING_CODE,
-    auth: state,
-    browser: ['Kira Tech Bot', 'Chrome', '1.0.0'],
-    generateHighQualityLinkPreview: true
-  });
-
-  // ---------- Demande du code de pairing ----------
-  if (USE_PAIRING_CODE && !sock.authState.creds.registered) {
-    let phoneNumber = PHONE_NUMBER;
-
-    // Si aucun numéro n'est défini dans le fichier, on le demande
-    if (!phoneNumber) {
-      phoneNumber = await askQuestion(
-        '📱 Entre ton numéro WhatsApp (format international, sans +) : '
-      );
-    }
-
-    // Petit délai pour être sûr que le socket est prêt
-    await new Promise(r => setTimeout(r, 3000));
-
-    try {
-      const code = await sock.requestPairingCode(phoneNumber);
-      console.log('\n═══════════════════════════════════════════');
-      console.log('   🔑  CODE DE PAIRING WHATSAPP  🔑');
-      console.log('═══════════════════════════════════════════');
-      console.log(`\n         👉  ${code}  👈\n`);
-      console.log('═══════════════════════════════════════════');
-      console.log('\n📖 Comment se connecter :');
-      console.log('   1. Ouvre WhatsApp sur ton téléphone');
-      console.log('   2. Va dans Paramètres → Appareils connectés');
-      console.log('   3. Appuie sur "Connecter un appareil"');
-      console.log('   4. Choisis "Connecter avec un numéro de téléphone"');
-      console.log('   5. Entre le code ci-dessus');
-      console.log('\n⏱️  Le code expire dans 5 minutes.\n');
-    } catch (err) {
-      console.error('❌ Erreur lors de la génération du code :', err.message);
-    }
-  }
-
-  // ---------- Gestion des mises à jour de connexion ----------
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    // Affichage du QR si mode QR activé
-    if (qr && !USE_PAIRING_CODE) {
-      const qrcode = await import('qrcode-terminal');
-      qrcode.default.generate(qr, { small: true });
-    }
-
-    // Connexion ouverte
-    if (connection === 'open') {
-      console.log('\n═══════════════════════════════════════════');
-      console.log('   ✅  BOT CONNECTÉ AVEC SUCCÈS  ✅');
-      console.log('═══════════════════════════════════════════');
-      console.log(`   📅 Date : ${new Date().toLocaleString('fr-FR')}`);
-      console.log(`   👤 Compte : ${sock.user?.id || 'inconnu'}`);
-      console.log('   📶 Statut : OPEN');
-      console.log('═══════════════════════════════════════════\n');
-      console.log('💡 Test : envoie ".ping" à ton propre numéro depuis un autre téléphone');
-      console.log('   (ou ajoute le bot dans un groupe et tape .ping)\n');
-    }
-
-    // Connexion fermée
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-      console.log('\n⚠️  Connexion fermée.');
-      console.log(`   Code : ${statusCode}`);
-      console.log(`   Raison : ${lastDisconnect?.error?.message || 'inconnue'}`);
-
-      if (shouldReconnect) {
-        console.log('🔄 Tentative de reconnexion dans 3 secondes...\n');
-        setTimeout(startWhatsApp, 3000);
-      } else {
-        console.log('❌ Déconnecté (loggedOut). Supprime le dossier ./session et relance.\n');
-        if (existsSync(SESSION_DIR)) {
-          rmSync(SESSION_DIR, { recursive: true, force: true });
-          console.log('🗑️  Dossier session supprimé.');
-        }
-      }
-    }
-  });
-
-  // ---------- Sauvegarde des credentials à chaque mise à jour ----------
-  sock.ev.on('creds.update', saveCreds);
-
-  // ---------- Réception des messages ----------
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      if (!msg.message) continue;
-      if (msg.key.fromMe) continue; // ignore nos propres messages
-
-      const from = msg.key.remoteJid;
-      const pushName = msg.pushName || 'Inconnu';
-
-      // Extrait le texte du message
-      const text =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
-        '';
-
-      if (!text) continue;
-
-      console.log(`📩 [${pushName}] ${from} : ${text}`);
-
-      // ---------- Commande .ping ----------
-      if (text.trim().toLowerCase() === '.ping') {
-        const start = Date.now();
-        await sock.sendMessage(from, { text: '🏓 Pong !' }, { quoted: msg });
-        const latency = Date.now() - start;
-        await sock.sendMessage(from, {
-          text: `⚡ Latence : ${latency} ms\n\n> Kira Tech Bot 🌹`
-        });
-      }
-
-      // ---------- Commande .alive ----------
-      if (text.trim().toLowerCase() === '.alive') {
-        await sock.sendMessage(from, {
-          text:
-            '✅ *Bot en ligne*\n\n' +
-            `📅 ${new Date().toLocaleString('fr-FR')}\n` +
-            `👤 Compte : ${sock.user?.id}\n\n` +
-            '> Kira Tech Bot 🌹'
-        }, { quoted: msg });
-      }
-    }
-  });
-
-  return sock;
-}
-
-// ---------- Lancement ----------
-startWhatsApp().catch(err => {
-  console.error('❌ Erreur fatale :', err);
-  process.exit(1);
+  await bot.sendPhoto(chatId, BOT_IMAGE, { caption: text });
 });
 
-// ---------- Nettoyage à l'arrêt ----------
+// ---------- /help ----------
+bot.onText(/\/help/, async (msg) => {
+  const chatId = msg.chat.id;
+  const text =
+    `📖 *AIDE - KIRA TECH BOT* 🌹\n\n` +
+    `*Commandes disponibles :*\n\n` +
+    `/start  - Message de bienvenue\n` +
+    `/help   - Cette aide\n` +
+    `/pair   - Connecter le bot à WhatsApp\n` +
+    `/menu   - Voir les commandes WhatsApp\n\n` +
+    `*Pour connecter WhatsApp :*\n` +
+    `1. Tape : /pair suivi de ton numéro\n` +
+    `   Ex: /pair 242061234567\n` +
+    `2. Récupère le code de pairing\n` +
+    `3. Ouvre WhatsApp → Appareils connectés\n` +
+    `4. Connecte avec le numéro\n` +
+    `5. Entre le code\n\n` +
+    `> Kira Tech Bot 🌹`;
+
+  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
+// ---------- /pair ----------
+bot.onText(/\/pair(?: (.+))?/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const phoneNumber = match[1]?.replace(/[^0-9]/g, '');
+
+  if (!phoneNumber) {
+    return bot.sendMessage(chatId,
+      `❌ *Format incorrect*\n\n` +
+      `Utilisation : \`/pair 242061234567\`\n` +
+      `(numéro sans le +, avec indicatif pays)`,
+      { parse_mode: 'Markdown' });
+  }
+
+  // Message d'attente
+  await bot.sendMessage(chatId,
+    `🔄 *Demande de pairing en cours...*\n` +
+    `Veuillez patienter 🙏\n\n` +
+    `> Kira Tech Bot 🌹`,
+    { parse_mode: 'Markdown' });
+
+  try {
+    // Génère le code de pairing
+    const code = await requestPairingCode(phoneNumber);
+
+    if (!code) {
+      return bot.sendMessage(chatId,
+        `❌ *Échec*\n` +
+        `Le code de pairing n'a pas pu être généré.\n` +
+        `Tape /pair pour réessayer 🥀`);
+    }
+
+    const formattedCode = code.match(/.{1,4}/g).join('-');
+
+    await bot.sendPhoto(chatId`, BOT_IMAGE, {
+      caption:
+        `✅ *Code de pairing généré*\n\n` +
+        `📱 Numéro : \`+${phoneNumber}\`\n\n 🔑` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `       🔑 \`${form\attedCode}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `*Comment connecter :*\n\n` +
+        `📱 *Android :*\n` +
+        `1. WhatsApp → ⋮ → Appareils connectés\n` +
+        `2. Connecter un appareil\n` +
+        `3. Connecter avec un numéro\n` +
+        `4. Entre le code ci-dessus\n\n` +
+        `🍎 *iPhone :*\n` +
+        `1. WhatsApp → Réglages → Appareils connectés\n` +
+        `2. Connecter un appareil\n` +
+        `3. Connecter avec un numéro\n` +
+        `4. Entre le code ci-dessus\n\n` +
+        `⏱️ Le code expire dans 5 minutes.\n\n` +
+        `> Kira Tech Bot 🌹`,
+      parse_mode: 'Markdown'
+    });
+
+  } catch (err) {
+    console.error('Erreur pairing:', err.message);
+    await bot.sendMessage(chatId,
+      `❌ *Échec*\n` +
+      `Erreur : ${err.message}\n\n` +
+      `Tape /pair pour réessayer 🥀`);
+  }
+});
+
+// ---------- /menu ----------
+bot.onText(/\/menu/, async (msg) => {
+  const chatId = msg.chat.id;
+  const text =
+    `▉ *KIRA TECH BOT* 🌹 ▉\n` +
+    `▰▰▰▰▰▰▰▰▰▰\n` +
+    `➠ Auteur : Mr Kira Tech 🌹\n` +
+    `➠ Prefix: *[ . ]*\n` +
+    `➠ Statut WhatsApp: *${waConnected ? '✅ Connecté' : '❌ Non connecté'}*\n\n` +
+    `______________________\n\n` +
+    `> ╢ GENERAL ♰\n` +
+    `╭▰▰▰▰▰▰▰◈\n` +
+    `┆❏ .ping\n` +
+    `┆❏ .alive\n` +
+    `┆❏ .menu\n` +
+    `┆❏ .owner\n` +
+    `╰▰▰▰▰▰▰▰◈\n\n` +
+    `> ╢ GROUP ♰\n` +
+    `╭▰▰▰▰▰▰▰◈\n` +
+    `┆❏ .kick\n` +
+    `┆❏ .promote\n` +
+    `┆❏ .tagall\n` +
+    `┆❏ .welcome\n` +
+    `┆❏ .goodbye\n` +
+    `╰▰▰▰▰▰▰▰◈\n\n` +
+    `> ╢ FUN ♰\n` +
+    `╭▰▰▰▰▰▰▰◈\n` +
+    `┆❏ .blague\n` +
+    `┆❏ .quote\n` +
+    `╰▰▰▰▰▰▰▰◈\n\n` +
+    `═══════════════════════════════════════════\n` +
+    `> Power by Kira Tech`;
+
+  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
+});
+
+// ============================================================
+//  PARTIE WHATSAPP (BAILEYS)
+// ============================================================
+
+async function requestPairingCode(phoneNumber) {
+  // Si un socket existe déjà, on le ferme
+  if (waSocket) {
+    try { waSocket.end(); } catch (e) {}
+    waSocket = null;
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState('./session');
+
+  // Si déjà connecté, pas besoin de nouveau code
+  if (state.creds.registered) {
+    console.log('✅ Session existante trouvée');
+    return 'DEJA_CONNECTE';
+  }
+
+  waSocket = makeWASocket({
+    auth: state,
+    logger,
+    printQRInTerminal: false,
+    browser: ['Kira Tech Bot', 'Chrome', '1.0.0']
+  });
+
+  // Sauvegarde des credentials
+  waSocket.ev.on('creds.update', saveCreds);
+
+  // Attendre que le socket soit prêt pour demander le code
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('Timeout : WhatsApp n\'a pas répondu à temps'));
+    }, 30000);
+
+    let codeRequested = false;
+
+    waSocket.ev.on('connection.update', async (update) => {
+      const { connection, qr, lastDisconnect } = update;
+
+      // Demander le code quand le QR est émis (socket prêt)
+      if (qr && !codeRequested && !state.creds.registered) {
+        codeRequested = true;
+        try {
+          const code = await waSocket.requestPairingCode(phoneNumber);
+          clearTimeout(timeout);
+          resolve(code);
+        } catch (err) {
+          clearTimeout(timeout);
+          reject(err);
+        }
+      }
+
+      // Connexion ouverte
+      if (connection === 'open') {
+        waConnected = true;
+        console.log('✅ WhatsApp connecté avec succès !');
+        console.log(`   Compte : ${waSocket.user?.id}`);
+        clearTimeout(timeout);
+      }
+
+      // Connexion fermée
+      if (connection === 'close') {
+        waConnected = false;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+        console.log(`⚠️ Connexion fermée (code ${statusCode})`);
+
+        if (shouldReconnect && !codeRequested) {
+          // Reconnexion
+          setTimeout(() => requestPairingCode(phoneNumber), 3000);
+        }
+      }
+    });
+  });
+}
+
+// ============================================================
+//  LANCEMENT
+// ============================================================
+
+console.log('═══════════════════════════════════════════');
+console.log('   ✦  KIRA TECH BOT DÉMARRÉ  ✦');
+console.log('═══════════════════════════════════════════');
+console.log('📡 Telegram : en ligne');
+console.log('📱 WhatsApp : en attente de /pair');
+console.log('═══════════════════════════════════════════');
+
+// Gestion propre de l'arrêt
 process.on('SIGINT', () => {
   console.log('\n👋 Arrêt du bot...');
   process.exit(0);
